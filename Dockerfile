@@ -3,7 +3,8 @@
 # Node 24 strips TypeScript's erasable syntax natively, so there's no build
 # step: the image just needs prod dependencies and the source, and runs the
 # .ts files directly. node:sqlite (also built in, no native addon) is the only
-# storage --- one file on the volume Fly mounts at /data.
+# storage --- one file on the volume Fly mounts at /data. three.js is a prod
+# dependency the server hands to the browser straight from node_modules.
 
 FROM node:24.21.0-bookworm-slim AS deps
 WORKDIR /app
@@ -17,6 +18,8 @@ ENV NODE_ENV=production
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json ./
 COPY src ./src
+# the archive's client modules; three.js itself comes from node_modules
+COPY public ./public
 COPY README.md ./
 EXPOSE 8080
 CMD ["node", "src/server.ts"]
