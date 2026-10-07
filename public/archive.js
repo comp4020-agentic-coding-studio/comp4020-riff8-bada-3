@@ -238,7 +238,8 @@ async function main() {
       // Land the list on the same mark the tree was showing.
       const item = document.getElementById(`m-${selected}`);
       for (let d = item?.closest("details"); d; d = d.parentElement?.closest("details")) d.open = true;
-      item?.scrollIntoView({ block: "center" });
+      // after the layout switch, or the scroll lands against the old layout
+      requestAnimationFrame(() => item?.scrollIntoView({ block: "center" }));
     }
   });
 
