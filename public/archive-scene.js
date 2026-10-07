@@ -121,7 +121,7 @@ export function startScene({ tree, container, initialId, reducedMotion, onSelect
 
   const composer = new EffectComposer(renderer);
   composer.addPass(new RenderPass(scene, camera));
-  const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.7, 0.5, 0.55);
+  const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.55, 0.45, 0.6);
   composer.addPass(bloom);
   composer.addPass(new OutputPass());
 
@@ -166,7 +166,7 @@ export function startScene({ tree, container, initialId, reducedMotion, onSelect
     if (!p) continue;
     const isCurrent = node.id === tree.rootId;
     const colour = isCurrent ? COLOURS.current : node.isRoot ? COLOURS.root : node.mine ? COLOURS.mine : COLOURS.mark;
-    const base = isCurrent ? 0.5 : node.isRoot ? 0.42 : 0.22;
+    const base = isCurrent ? 0.44 : node.isRoot ? 0.38 : 0.22;
     const mesh = new THREE.Mesh(sphere, new THREE.MeshBasicMaterial({ color: colour, toneMapped: false }));
     mesh.position.set(p.x, p.y, p.z);
     mesh.userData.id = node.id;

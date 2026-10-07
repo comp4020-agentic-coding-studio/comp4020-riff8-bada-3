@@ -93,7 +93,7 @@ async function main() {
   const toggle = el("button", { type: "button", class: "view-toggle", "aria-pressed": "false" }, "List view");
   const announce = el("p", { class: "sr-only", "aria-live": "polite" });
 
-  const preview = el("aside", { class: "preview", "aria-label": "Selected mark" });
+  const preview = el("section", { class: "preview", "aria-label": "Selected mark" });
   const pWho = el("p", { class: "preview-who" });
   const pBody = el("p", { class: "preview-body" });
   const pMeta = el("p", { class: "preview-meta" });
@@ -133,7 +133,9 @@ async function main() {
 
   hud.append(legend, preview, dpad);
   list.before(toggle);
-  archive.after(stage, hud, announce);
+  // Inside <main>, so every control sits in a landmark; the HUD is fixed-position.
+  archive.append(hud, announce);
+  archive.after(stage);
 
   // ---- state ---------------------------------------------------------------------
   let selected = initialId(tree);
