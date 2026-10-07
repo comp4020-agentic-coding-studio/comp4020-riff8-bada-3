@@ -41,22 +41,28 @@ change first --- not the other way around.
 
 - No accounts. Identity is a random id in a first-party cookie, issued on
   first visit. Never add passwords, email, or OAuth --- this app only needs
-  to tell two visitors apart, not verify who they are.
-- Marks are permanent once posted: no edit, no delete. That's a deliberate
-  scope decision (README explains why), not a gap to quietly fill in.
+  to tell two visitors apart, not verify who they are. `visitor_id` never
+  leaves the server: `/archive.json` sends a per-request `mine` flag instead.
+- Marks are permanent once posted: no edit, no delete. A week is sealed at
+  00:00 Monday, Sydney time: nothing can be posted under any mark in a past
+  week, and the form isn't rendered there.
+- The tree is a parent pointer (`marks.parent_id`); week roots are rows in
+  `marks`, chained through `weeks.prev_week_id`. Never store children as an
+  array. Rollover is lazy, on request, never a timer (the machine sleeps).
+- Week arithmetic goes through `src/week.ts`, which asks `Intl` for Sydney's
+  offset. Never hard-code +10/+11.
+- Schema changes are additive and run at boot against a populated volume.
+  Never drop or rewrite a real mark's name or body.
 - Escape every piece of user-submitted text before it reaches HTML
-  (`escapeHtml` in `src/render.ts`). Never string-interpolate a name or a
-  mark's body straight into a template.
-- Server-rendered HTML is the interface. The core interaction (post a mark,
-  see the wall) has to work with JavaScript off; anything JS adds is
-  enhancement, never a requirement.
+  (`escapeHtml` in `src/render.ts`). On the client, user text goes in via
+  `textContent` only, never `innerHTML`.
+- Server-rendered HTML is the interface. Home and mark pages work fully with
+  JavaScript off. The archive is the one place JS is required, and its
+  nested-list fallback (no JS, no WebGL, or "List view") must stay complete.
 - One SQLite file on the Fly volume (`node:sqlite`, no native dependency,
-  no separate database service) is the only storage. Don't reach for a
-  second store or an ORM for a schema this small.
-- Build to the crit that's currently open, not ahead of it: real-time
-  updates are crit 9's bar, server-side logging is crit 11's. Land them when
-  their crit opens, not preemptively --- a feature built early is one more
-  thing to keep correct while the next crit's actual bar goes unaddressed.
-- Keep dependencies to what's load-bearing. `marked` renders README.md at
-  `/readme/`, correctly, without hand-rolling markdown parsing; anything
-  else new needs the same justification.
+  no separate database service) is the only storage. No ORM, no build step.
+- Dependencies: `marked` renders README.md at `/readme/`; `three` drives the
+  archive and is served from `node_modules` under its version, through the
+  import map in `src/server.ts`. Anything else new needs the same
+  justification.
+- `scripts/seed.ts` is for a scratch `DATA_DIR` only, never `/data`.
