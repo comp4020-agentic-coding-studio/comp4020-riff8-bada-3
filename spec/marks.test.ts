@@ -208,10 +208,12 @@ it("serves three.js and the client modules with JavaScript content types", async
   const map = JSON.parse(doc.querySelector('script[type="importmap"]')!.textContent!) as {
     imports: Record<string, string>;
   };
-  for (const path of [map.imports.three, "/static/archive.js"]) {
+  const app = doc.querySelector('script[type="module"]')!.getAttribute("src")!;
+  for (const path of [map.imports.three, app]) {
     const res = await fetch(new URL(path, baseUrl));
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toMatch(/^text\/javascript/);
   }
-  expect((await fetch(new URL("/static/../package.json", baseUrl))).status).toBe(404);
+  // an encoded slash survives URL parsing, so this really asks for ../
+  expect((await fetch(new URL(app.replace("archive.js", "..%2fpackage.json"), baseUrl))).status).toBe(404);
 });

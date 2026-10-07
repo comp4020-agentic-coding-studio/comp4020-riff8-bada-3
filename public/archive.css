@@ -1,1 +1,177 @@
+/* The archive page: a readable nested list by default (no JS, no WebGL, or
+   "List view"), and a full-viewport scene with a HUD when the tree runs. */
 
+#list-view details { margin: 0.5rem 0; }
+#list-view summary { cursor: pointer; padding: 0.25rem 0; }
+#list-view ul { margin: 0.25rem 0; padding-left: 1.25rem; border-left: 1px solid color-mix(in srgb, currentColor 20%, transparent); }
+#list-view li { margin: 0.35rem 0; list-style: none; overflow-wrap: anywhere; }
+#list-view li:target > a, #list-view details:target > summary { outline: 2px solid currentColor; outline-offset: 2px; }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.view-toggle { margin: 0 0 1rem; }
+
+.stage, .hud { display: none; }
+
+/* ---- scene mode ---------------------------------------------------------- */
+
+body.scene-on { max-width: none; margin: 0; padding: 0; overflow: hidden; background: #060a14; color: #e8ecf4; color-scheme: dark; }
+body.scene-on #list-view, body.scene-on footer { display: none; }
+body.scene-on a { color: #9fd8ff; }
+
+body.scene-on .site-nav,
+body.scene-on #archive > h1,
+body.scene-on #archive-intro,
+body.scene-on .view-toggle {
+  position: fixed;
+  z-index: 3;
+  margin: 0;
+}
+body.scene-on .site-nav { top: 0; left: 1rem; padding: 0.75rem 0; }
+body.scene-on #archive > h1 { top: 2.6rem; left: 1rem; font-size: 1.4rem; font-weight: 600; letter-spacing: 0.02em; }
+body.scene-on #archive-intro { top: 4.7rem; left: 1rem; max-width: 22rem; font-size: 0.8rem; color: #aab4c8; }
+body.scene-on .view-toggle {
+  top: 0.6rem;
+  right: 1rem;
+  background: rgb(20 28 46 / 0.85);
+  color: inherit;
+  border: 1px solid rgb(159 216 255 / 0.4);
+  border-radius: 0.4rem;
+  padding: 0.35rem 0.8rem;
+}
+
+body.scene-on .stage {
+  display: block;
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  outline: none;
+  touch-action: none;
+}
+body.scene-on .stage:focus-visible { box-shadow: inset 0 0 0 3px #9fd8ff; }
+body.scene-loading .stage::after {
+  content: "Growing the tree…";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #aab4c8;
+}
+.stage.bump { animation: bump 0.25s; }
+@keyframes bump { 50% { transform: translateX(-4px); } }
+.stage.cut { animation: cut 0.18s ease-out; }
+@keyframes cut { from { opacity: 0.4; } }
+
+.scene-canvas { display: block; position: absolute; inset: 0; }
+.scene-labels { position: absolute; inset: 0; pointer-events: none; }
+
+.bubble {
+  pointer-events: auto;
+  cursor: pointer;
+  display: grid;
+  max-width: 11rem;
+  padding: 0.3rem 0.55rem;
+  margin-top: 0.3rem;
+  border-radius: 0.7rem;
+  background: rgb(10 18 34 / 0.72);
+  border: 1px solid rgb(120 210 240 / 0.35);
+  color: #e8ecf4;
+  font-size: 0.72rem;
+  line-height: 1.3;
+  backdrop-filter: blur(3px);
+  transition: border-color 0.2s, background 0.2s;
+  user-select: text;
+}
+.bubble:hover { border-color: rgb(160 230 255 / 0.9); }
+.bubble-who { font-weight: 600; color: #bfe9ff; }
+.bubble-what { color: #cfd6e4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.bubble-root { max-width: 13rem; border-color: rgb(255 200 110 / 0.5); }
+.bubble-root .bubble-who { color: #ffd98a; font-size: 0.8rem; }
+.bubble-mine { border-color: rgb(240 140 210 / 0.55); }
+.bubble.is-selected { background: rgb(22 36 62 / 0.92); border-color: #fff; box-shadow: 0 0 1.2rem rgb(160 220 255 / 0.35); }
+
+body.scene-on .hud { display: block; }
+.hud > * { position: fixed; z-index: 3; }
+
+.preview {
+  left: 1rem;
+  bottom: 1rem;
+  width: min(24rem, calc(100vw - 2rem));
+  max-height: 40vh;
+  overflow: auto;
+  padding: 0.8rem 1rem;
+  border-radius: 0.6rem;
+  background: rgb(12 20 38 / 0.9);
+  border: 1px solid rgb(159 216 255 / 0.35);
+  box-sizing: border-box;
+}
+.preview.is-hover { border-style: dashed; }
+.preview p { margin: 0 0 0.4rem; }
+.preview-who { font-weight: 600; color: #bfe9ff; }
+.preview-body { white-space: pre-wrap; overflow-wrap: anywhere; }
+.preview-meta { font-size: 0.8rem; color: #aab4c8; }
+.preview-open { font-weight: 600; }
+
+.dpad {
+  right: 1rem;
+  bottom: 1rem;
+  display: grid;
+  grid-template-columns: repeat(3, 2.75rem);
+  grid-template-rows: repeat(3, 2.75rem);
+  grid-template-areas: ". up ." "left home right" ". down .";
+  gap: 0.25rem;
+}
+.pad {
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  font-size: 1.1rem;
+  color: #e8ecf4;
+  background: rgb(20 28 46 / 0.85);
+  border: 1px solid rgb(159 216 255 / 0.35);
+  border-radius: 0.5rem;
+}
+.pad:hover { border-color: #9fd8ff; }
+.pad-up { grid-area: up; }
+.pad-left { grid-area: left; }
+.pad-home { grid-area: home; }
+.pad-right { grid-area: right; }
+.pad-down { grid-area: down; }
+
+.legend {
+  top: 3rem;
+  right: 1rem;
+  max-width: 17rem;
+  font-size: 0.75rem;
+  color: #aab4c8;
+  background: rgb(12 20 38 / 0.7);
+  border-radius: 0.5rem;
+  padding: 0.4rem 0.7rem;
+}
+.legend summary { cursor: pointer; color: #e8ecf4; }
+.legend dl { display: grid; grid-template-columns: auto 1fr; gap: 0.15rem 0.6rem; margin: 0.4rem 0 0.2rem; }
+.legend dt { font-weight: 600; color: #e8ecf4; white-space: nowrap; }
+.legend dd { margin: 0; }
+
+body.scene-on :focus-visible { outline: 2px solid #9fd8ff; outline-offset: 2px; }
+
+@media (max-width: 640px) {
+  body.scene-on #archive-intro { display: none; }
+  body.scene-on #archive > h1 { font-size: 1.1rem; }
+  .preview { bottom: calc(8.75rem + 1.5rem); max-height: 26vh; font-size: 0.9rem; right: 1rem; width: auto; }
+  .dpad { right: 50%; transform: translateX(50%); }
+  .bubble { max-width: 8.5rem; font-size: 0.66rem; }
+  .bubble-root { max-width: 9.5rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stage.bump, .stage.cut { animation: none; }
+  .bubble { transition: none; }
+}

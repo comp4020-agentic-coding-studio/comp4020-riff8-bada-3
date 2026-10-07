@@ -1,7 +1,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdirSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { extname, normalize, resolve, sep } from "node:path";
+import { extname, join, normalize, resolve, sep } from "node:path";
 import { marked } from "marked";
 import { getCookie, getVisitorId, setCookie } from "./cookies.ts";
 import {
@@ -29,14 +30,22 @@ const dataDir = process.env.DATA_DIR ?? "/data";
 mkdirSync(dataDir, { recursive: true });
 const store: Store = openStore(`${dataDir}/marks.sqlite`);
 
-// three.js is served from node_modules under a versioned path, so it can be
-// cached for good; our own client modules change with deploys, so they can't.
+// three.js is served from node_modules under its version, and our client
+// modules under a hash of their contents, so both can be cached for good and a
+// deploy can never mix old and new modules in one page.
 const THREE_VERSION = (JSON.parse(readFileSync("node_modules/three/package.json", "utf8")) as { version: string })
   .version;
-const STATIC_ROOTS: [prefix: string, dir: string, cache: string][] = [
-  [`/vendor/three@${THREE_VERSION}/addons/`, "node_modules/three/examples/jsm", "public, max-age=31536000, immutable"],
-  [`/vendor/three@${THREE_VERSION}/`, "node_modules/three/build", "public, max-age=31536000, immutable"],
-  ["/static/", "public", "public, max-age=300"],
+const PUBLIC_HASH = (() => {
+  const hash = createHash("sha256");
+  for (const file of readdirSync("public").sort()) hash.update(file).update(readFileSync(join("public", file)));
+  return hash.digest("hex").slice(0, 10);
+})();
+const STATIC = `/static/${PUBLIC_HASH}/`;
+const IMMUTABLE = "public, max-age=31536000, immutable";
+const STATIC_ROOTS: [prefix: string, dir: string][] = [
+  [`/vendor/three@${THREE_VERSION}/addons/`, "node_modules/three/examples/jsm"],
+  [`/vendor/three@${THREE_VERSION}/`, "node_modules/three/build"],
+  [STATIC, "public"],
 ];
 const CONTENT_TYPES: Record<string, string> = {
   ".js": "text/javascript; charset=utf-8",
@@ -165,9 +174,9 @@ ${archiveList(store.weeks(), byParent, current.id)}
     {
       nav: "archive",
       bodyClass: "archive-page",
-      head: `<link rel="stylesheet" href="/static/archive.css">
+      head: `<link rel="stylesheet" href="${STATIC}archive.css">
 <script type="importmap">${importMap}</script>
-<script type="module" src="/static/archive.js"></script>`,
+<script type="module" src="${STATIC}archive.js"></script>`,
     },
   );
 }
@@ -223,7 +232,7 @@ function archiveJson(visitorId: string, now: Date): unknown {
 }
 
 async function serveStatic(pathname: string, res: ServerResponse): Promise<boolean> {
-  for (const [prefix, dir, cache] of STATIC_ROOTS) {
+  for (const [prefix, dir] of STATIC_ROOTS) {
     if (!pathname.startsWith(prefix)) continue;
     const base = resolve(dir);
     let rel: string;
@@ -237,7 +246,7 @@ async function serveStatic(pathname: string, res: ServerResponse): Promise<boole
     if (!file.startsWith(base + sep) || !type) return false;
     try {
       const data = await readFile(file);
-      res.writeHead(200, { "Content-Type": type, "Cache-Control": cache });
+      res.writeHead(200, { "Content-Type": type, "Cache-Control": IMMUTABLE });
       res.end(data);
       return true;
     } catch {
@@ -292,7 +301,7 @@ const server = createServer((req, res) => {
       const url = new URL(req.url ?? "/", "http://localhost");
       const now = new Date();
 
-      if (req.method === "GET" && (await serveStatic(url.pathname, res))) return;
+      if ((req.method === "GET" || req.method === "HEAD") && (await serveStatic(url.pathname, res))) return;
 
       const visitorId = getVisitorId(req, res);
       const lastName = getCookie(req, "name") ?? "";

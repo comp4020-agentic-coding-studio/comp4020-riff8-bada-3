@@ -14,7 +14,9 @@
     "noEmit": true,
     "skipLibCheck": true,
     "moduleDetection": "force",
-    "verbatimModuleSyntax": true
+    "verbatimModuleSyntax": true,
+    // the archive's client modules are plain JS; spec/ imports the pure one
+    "allowJs": true
   },
   "include": ["*.ts", "spec", "scripts", "src"]
 }
