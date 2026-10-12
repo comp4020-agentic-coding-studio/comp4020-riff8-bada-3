@@ -21,5 +21,7 @@ COPY src ./src
 # the archive's client modules; three.js itself comes from node_modules
 COPY public ./public
 COPY README.md ./
+# the server-local audit query (see README)
+COPY scripts/audit.ts ./scripts/
 EXPOSE 8080
 CMD ["node", "src/server.ts"]

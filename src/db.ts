@@ -59,6 +59,23 @@ export interface AuditFilter {
 export const SYSTEM_VISITOR = "system";
 export const SYSTEM_NAME = "Marks";
 
+export type AuditRow = AuditEvent & { id: number };
+
+// The newest `limit` matching events, oldest first. `mark` matches the mark
+// itself or anything posted under it. Shared with scripts/audit.ts.
+export function selectAudit(db: DatabaseSync, f: AuditFilter = {}): AuditRow[] {
+  const where: string[] = [];
+  const args: (string | number)[] = [];
+  if (f.actor) (where.push("actor = ?"), args.push(f.actor));
+  if (f.action) (where.push("action = ?"), args.push(f.action));
+  if (f.mark !== undefined) (where.push("(mark_id = ? or parent_id = ?)"), args.push(f.mark, f.mark));
+  if (f.since) (where.push("ts >= ?"), args.push(f.since));
+  if (f.until) (where.push("ts < ?"), args.push(f.until));
+  const filter = where.length ? ` where ${where.join(" and ")}` : "";
+  const sql = `select * from (select * from audit${filter} order by id desc limit ?) order by id`;
+  return db.prepare(sql).all(...args, f.limit ?? 200) as unknown as AuditRow[];
+}
+
 function columns(db: DatabaseSync, table: string): Set<string> {
   const rows = db.prepare(`pragma table_info(${table})`).all() as { name: string }[];
   return new Set(rows.map((r) => r.name));
@@ -301,16 +318,8 @@ export function openStore(file: string, opts: StoreOptions = {}) {
     return (stmt.childCount.get(id) as { n: number }).n;
   }
 
-  function queryAudit(f: AuditFilter = {}): (AuditEvent & { id: number })[] {
-    const where: string[] = [];
-    const args: (string | number)[] = [];
-    if (f.actor) (where.push("actor = ?"), args.push(f.actor));
-    if (f.action) (where.push("action = ?"), args.push(f.action));
-    if (f.mark !== undefined) (where.push("(mark_id = ? or parent_id = ?)"), args.push(f.mark, f.mark));
-    if (f.since) (where.push("ts >= ?"), args.push(f.since));
-    if (f.until) (where.push("ts < ?"), args.push(f.until));
-    const sql = `select * from (select * from audit${where.length ? ` where ${where.join(" and ")}` : ""} order by id desc limit ?) order by id`;
-    return db.prepare(sql).all(...args, f.limit ?? 200) as unknown as (AuditEvent & { id: number })[];
+  function queryAudit(f: AuditFilter = {}): AuditRow[] {
+    return selectAudit(db, f);
   }
 
   function weeks(): WeekRow[] {
