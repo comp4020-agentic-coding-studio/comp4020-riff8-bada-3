@@ -194,9 +194,10 @@ function field(
   hint: string,
   error: string | undefined,
   control: (attrs: string) => string,
+  focus = false,
 ): string {
   const describedBy = `${id}-hint${error ? ` ${id}-error` : ""}`;
-  const attrs = `id="${id}" name="${id}" required aria-describedby="${describedBy}"${error ? ' aria-invalid="true"' : ""}`;
+  const attrs = `id="${id}" name="${id}" required aria-describedby="${describedBy}"${error ? ' aria-invalid="true"' : ""}${focus ? " autofocus" : ""}`;
   return `<p class="field">
     <label for="${id}">${label}</label>
     ${control(attrs)}
@@ -207,7 +208,7 @@ function field(
 }
 
 // The post/reply form. On a rejected submission it comes back with the draft
-// in it and each problem attached to its field.
+// in it, each problem attached to its field, and the first bad field focused.
 export function postForm(opts: FormOptions): string {
   const draft = opts.draft ?? { name: "", body: "" };
   const errors = opts.errors ?? {};
@@ -217,8 +218,8 @@ export function postForm(opts: FormOptions): string {
       ? `\n  <div class="form-errors" role="alert"><p>Not posted yet. ${Object.keys(errors).length === 2 ? "Both fields need" : "One field needs"} a fix; your draft is still here.</p></div>`
       : ""
   }
-  ${field("name", "Your name", `Up to ${MAX_NAME} characters. Most emoji count as two.`, errors.name, (a) => `<input ${a} maxlength="${MAX_NAME}" autocomplete="name" value="${escapeHtml(draft.name)}">`)}
-  ${field("body", opts.bodyLabel, `Up to ${MAX_BODY} characters. Once posted it stays: there's no edit or delete.`, errors.body, (a) => `<textarea ${a} maxlength="${MAX_BODY}" rows="3">${escapeHtml(draft.body)}</textarea>`)}
+  ${field("name", "Your name", `Up to ${MAX_NAME} characters. Most emoji count as two.`, errors.name, (a) => `<input ${a} maxlength="${MAX_NAME}" autocomplete="name" value="${escapeHtml(draft.name)}">`, Boolean(errors.name))}
+  ${field("body", opts.bodyLabel, `Up to ${MAX_BODY} characters. Once posted it stays: there's no edit or delete.`, errors.body, (a) => `<textarea ${a} maxlength="${MAX_BODY}" rows="3">${escapeHtml(draft.body)}</textarea>`, Boolean(errors.body && !errors.name))}
   <p class="actions"><button type="submit">${opts.cta}</button></p>
 </form>`;
 }

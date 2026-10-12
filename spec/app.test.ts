@@ -153,6 +153,7 @@ describe("validation never shortens a permanent mark", () => {
     expect(page.getElementById("name-error")?.textContent).toMatch(/41 characters.*at most 40/);
     expect(page.querySelector("#body")?.textContent).toBe("hello");
     expect(page.querySelector("#body")?.hasAttribute("aria-invalid")).toBe(false);
+    expect(input.hasAttribute("autofocus")).toBe(true);
   });
 
   it("stores names and bodies exactly at the limit intact, emoji included", async () => {

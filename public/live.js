@@ -168,7 +168,6 @@ export function startLive(handlers = {}) {
     if (newer) {
       const oldLabel = document.getElementById("week-label")?.textContent ?? "Last week";
       cfg.weekStart = w.weekStart;
-      cfg.current = String(w.id);
       if (cfg.page === "home") moveHomeOn(w, oldLabel);
       if (cfg.page === "mark" && cfg.archived !== "1" && cfg.week !== String(w.id)) seal(cfg.weekLabel ?? oldLabel);
       addWeekToList(w);
