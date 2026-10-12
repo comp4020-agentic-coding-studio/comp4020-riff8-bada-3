@@ -76,6 +76,11 @@ function edgeCurve(from, to, spine) {
 }
 
 /**
+ * The scene's whole lifecycle: built once per WebGL context, fed new trees
+ * with update(), paused when nobody can see it, disposed when it's done or the
+ * context is lost. If anything throws while it's being built, whatever was
+ * made is released before the error reaches the caller.
+ *
  * @param {{
  *   tree: Tree,
  *   container: HTMLElement,
@@ -84,24 +89,65 @@ function edgeCurve(from, to, spine) {
  *   onSelect: (id: number) => void,
  *   onHover: (id: number | null) => void,
  *   onOpen: (id: number) => void,
+ *   onContextLost?: () => void,
  * }} opts
  */
-export function startScene({ tree, container, initialId, reducedMotion, onSelect, onHover, onOpen }) {
-  const positions = layout(tree);
+export function startScene(opts) {
+  /** @type {(() => void)[]} */
+  const cleanup = [];
+  try {
+    return buildScene(opts, cleanup);
+  } catch (err) {
+    for (const fn of cleanup.reverse()) {
+      try {
+        fn();
+      } catch {
+        // already half gone
+      }
+    }
+    throw err;
+  }
+}
+
+/** @param {Parameters<typeof startScene>[0]} opts @param {(() => void)[]} cleanup */
+function buildScene(
+  { tree: initialTree, container, initialId, reducedMotion, onSelect, onHover, onOpen, onContextLost },
+  cleanup,
+) {
+  const events = new AbortController();
+  cleanup.push(() => events.abort());
+  const { signal } = events;
   const glow = glowTexture();
+  cleanup.push(() => glow.dispose());
 
   const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+  cleanup.push(() => {
+    renderer.setAnimationLoop(null);
+    renderer.dispose();
+    renderer.forceContextLoss();
+    renderer.domElement.remove();
+  });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
   renderer.setClearColor(BACKGROUND);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.domElement.setAttribute("aria-hidden", "true");
   renderer.domElement.className = "scene-canvas";
   container.append(renderer.domElement);
+  renderer.domElement.addEventListener(
+    "webglcontextlost",
+    (e) => {
+      e.preventDefault();
+      pause();
+      onContextLost?.();
+    },
+    { signal },
+  );
 
   const labels = new CSS2DRenderer();
   labels.domElement.className = "scene-labels";
   labels.domElement.setAttribute("aria-hidden", "true");
   container.append(labels.domElement);
+  cleanup.push(() => labels.domElement.remove());
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(BACKGROUND);
@@ -109,6 +155,7 @@ export function startScene({ tree, container, initialId, reducedMotion, onSelect
 
   const camera = new THREE.PerspectiveCamera(52, 1, 0.1, 400);
   const controls = new OrbitControls(camera, renderer.domElement);
+  cleanup.push(() => controls.dispose());
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
   controls.screenSpacePanning = true;
@@ -124,100 +171,152 @@ export function startScene({ tree, container, initialId, reducedMotion, onSelect
   const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.55, 0.45, 0.6);
   composer.addPass(bloom);
   composer.addPass(new OutputPass());
+  cleanup.push(() => {
+    bloom.dispose();
+    composer.dispose();
+  });
 
   // Everything that sways moves together, so edges stay attached to bubbles.
   const treeGroup = new THREE.Group();
   scene.add(treeGroup);
+  const sphere = new THREE.SphereGeometry(1, 24, 16);
+  cleanup.push(() => sphere.dispose());
 
-  // ---- edges -------------------------------------------------------------
+  /** @param {THREE.Object3D} obj */
+  const release = (obj) => {
+    const o = /** @type {THREE.Mesh} */ (obj);
+    if (o.geometry && o.geometry !== sphere) o.geometry.dispose();
+    const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+    for (const m of mats) m.dispose();
+  };
+
+  // ---- the tree: edges and bubbles, rebuilt whenever the data changes --------
+  let tree = initialTree;
+  /** @type {Map<number, { x: number, y: number, z: number, grow: number }>} */
+  let positions = new Map();
   /** @type {Map<number, { curve: THREE.CubicBezierCurve3, mesh: THREE.Mesh, start: number, end: number, samples: THREE.Vector3[], opacity: number }>} */
-  const edges = new Map(); // keyed by child id
-  for (const node of tree.nodes.values()) {
-    if (node.parentId === null) continue;
-    const from = positions.get(node.parentId);
-    const to = positions.get(node.id);
-    if (!from || !to) continue;
-    const spine = node.isRoot;
-    const curve = edgeCurve(from, to, spine);
-    const geometry = new THREE.TubeGeometry(curve, spine ? 48 : 20, spine ? 0.11 : 0.035, spine ? 8 : 5, false);
-    // One material per edge, so an edge that swings close to the camera can
-    // fade on its own instead of flaring across the screen.
-    const opacity = spine ? 1 : 0.85;
-    const material = new THREE.MeshBasicMaterial({
-      color: spine ? COLOURS.spine : COLOURS.branch,
-      toneMapped: false,
-      transparent: true,
-      opacity,
-    });
-    const mesh = new THREE.Mesh(geometry, material);
-    treeGroup.add(mesh);
-    const samples = [0, 0.2, 0.4, 0.6, 0.8, 1].map((u) => curve.getPoint(u));
-    edges.set(node.id, { curve, mesh, start: from.grow * GROW_STEP, end: to.grow * GROW_STEP, samples, opacity });
+  let edges = new Map(); // keyed by child id
+  /** @type {Map<number, { mesh: THREE.Mesh, halo: THREE.Sprite, label: CSS2DObject, el: HTMLElement, base: number, born: number, phase: number }>} */
+  let bubbles = new Map();
+  /** @type {THREE.Mesh[]} */
+  let pickable = [];
+  let spineLength = 1;
+
+  function clearTree() {
+    for (const child of [...treeGroup.children]) {
+      if (child === ring || child === pulse) continue;
+      treeGroup.remove(child); // a CSS2DObject takes its element with it
+      release(child);
+    }
+    edges = new Map();
+    bubbles = new Map();
+    pickable = [];
   }
 
-  // ---- bubbles -------------------------------------------------------------
-  const sphere = new THREE.SphereGeometry(1, 24, 16);
-  /** @type {Map<number, { mesh: THREE.Mesh, halo: THREE.Sprite, label: CSS2DObject, el: HTMLElement, base: number, born: number, phase: number }>} */
-  const bubbles = new Map();
-  /** @type {THREE.Mesh[]} */
-  const pickable = [];
-  for (const node of tree.nodes.values()) {
-    const p = positions.get(node.id);
-    if (!p) continue;
-    const isCurrent = node.id === tree.rootId;
-    const colour = isCurrent ? COLOURS.current : node.isRoot ? COLOURS.root : node.mine ? COLOURS.mine : COLOURS.mark;
-    const base = isCurrent ? 0.44 : node.isRoot ? 0.38 : 0.22;
-    const mesh = new THREE.Mesh(sphere, new THREE.MeshBasicMaterial({ color: colour, toneMapped: false }));
-    mesh.position.set(p.x, p.y, p.z);
-    mesh.userData.id = node.id;
-    treeGroup.add(mesh);
-    pickable.push(mesh);
+  /**
+   * @param {Set<number>} [known] ids already on screen: they appear fully
+   *   grown, and only what's new grows in. Without it, the whole tree grows.
+   */
+  function buildTree(known) {
+    positions = layout(tree);
+    const now = age();
+    /** @param {number} id @param {number} grow */
+    const bornAt = (id, grow) => (!known ? grow * GROW_STEP : known.has(id) ? -1e6 : now);
 
-    const halo = new THREE.Sprite(
-      new THREE.SpriteMaterial({
-        map: glow,
-        color: colour,
+    for (const node of tree.nodes.values()) {
+      if (node.parentId === null) continue;
+      const from = positions.get(node.parentId);
+      const to = positions.get(node.id);
+      if (!from || !to) continue;
+      const spine = node.isRoot;
+      const curve = edgeCurve(from, to, spine);
+      const geometry = new THREE.TubeGeometry(curve, spine ? 48 : 20, spine ? 0.11 : 0.035, spine ? 8 : 5, false);
+      // One material per edge, so an edge that swings close to the camera can
+      // fade on its own instead of flaring across the screen.
+      const opacity = spine ? 1 : 0.85;
+      const material = new THREE.MeshBasicMaterial({
+        color: spine ? COLOURS.spine : COLOURS.branch,
+        toneMapped: false,
         transparent: true,
-        opacity: 0.35,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending,
-      }),
-    );
-    halo.position.copy(mesh.position);
-    treeGroup.add(halo);
-
-    // Bubble text is real DOM, filled with textContent only.
-    const el = document.createElement("div");
-    el.className = `bubble${node.isRoot ? " bubble-root" : ""}${node.mine ? " bubble-mine" : ""}`;
-    const who = document.createElement("span");
-    who.className = "bubble-who";
-    const what = document.createElement("span");
-    what.className = "bubble-what";
-    if (node.isRoot) {
-      who.textContent = isCurrent ? `${node.body} · now` : node.body;
-      const first = firstMark(tree, node.id);
-      what.textContent = first ? `${first.name}: ${snippet(first.body, 48)}` : "No marks this week";
-    } else {
-      who.textContent = node.name;
-      what.textContent = snippet(node.body, 56);
+        opacity,
+      });
+      const mesh = new THREE.Mesh(geometry, material);
+      treeGroup.add(mesh);
+      const samples = [0, 0.2, 0.4, 0.6, 0.8, 1].map((u) => curve.getPoint(u));
+      const fresh = known && !known.has(node.id);
+      const start = fresh ? now : bornAt(node.parentId, from.grow);
+      const end = fresh ? now + 0.35 : bornAt(node.id, to.grow);
+      edges.set(node.id, { curve, mesh, start, end, samples, opacity });
     }
-    el.append(who, what);
-    el.addEventListener("click", (e) => {
-      e.stopPropagation();
-      pick(node.id);
-    });
-    el.addEventListener("pointerenter", (e) => {
-      if (e.pointerType === "mouse") onHover(node.id);
-    });
-    el.addEventListener("pointerleave", (e) => {
-      if (e.pointerType === "mouse") onHover(null);
-    });
-    const label = new CSS2DObject(el);
-    label.position.set(p.x, p.y - base - 0.25, p.z);
-    label.center.set(0.5, 0);
-    treeGroup.add(label);
 
-    bubbles.set(node.id, { mesh, halo, label, el, base, born: p.grow * GROW_STEP, phase: Math.random() * Math.PI * 2 });
+    for (const node of tree.nodes.values()) {
+      const p = positions.get(node.id);
+      if (!p) continue;
+      const isCurrent = node.id === tree.rootId;
+      const colour = isCurrent ? COLOURS.current : node.isRoot ? COLOURS.root : node.mine ? COLOURS.mine : COLOURS.mark;
+      const base = isCurrent ? 0.44 : node.isRoot ? 0.38 : 0.22;
+      const mesh = new THREE.Mesh(sphere, new THREE.MeshBasicMaterial({ color: colour, toneMapped: false }));
+      mesh.position.set(p.x, p.y, p.z);
+      mesh.userData.id = node.id;
+      treeGroup.add(mesh);
+      pickable.push(mesh);
+
+      const halo = new THREE.Sprite(
+        new THREE.SpriteMaterial({
+          map: glow,
+          color: colour,
+          transparent: true,
+          opacity: 0.35,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+        }),
+      );
+      halo.position.copy(mesh.position);
+      treeGroup.add(halo);
+
+      // Bubble text is real DOM, filled with textContent only.
+      const el = document.createElement("div");
+      el.className = `bubble${node.isRoot ? " bubble-root" : ""}${node.mine ? " bubble-mine" : ""}`;
+      const who = document.createElement("span");
+      who.className = "bubble-who";
+      const what = document.createElement("span");
+      what.className = "bubble-what";
+      if (node.isRoot) {
+        who.textContent = isCurrent ? `${node.body} · now` : node.body;
+        const first = firstMark(tree, node.id);
+        what.textContent = first ? `${first.name}: ${snippet(first.body, 48)}` : "No marks this week";
+      } else {
+        who.textContent = node.name;
+        what.textContent = snippet(node.body, 56);
+      }
+      el.append(who, what);
+      el.classList.toggle("is-selected", node.id === selected);
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        pick(node.id);
+      });
+      el.addEventListener("pointerenter", (e) => {
+        if (e.pointerType === "mouse") onHover(node.id);
+      });
+      el.addEventListener("pointerleave", (e) => {
+        if (e.pointerType === "mouse") onHover(null);
+      });
+      const label = new CSS2DObject(el);
+      label.position.set(p.x, p.y - base - 0.25, p.z);
+      label.center.set(0.5, 0);
+      treeGroup.add(label);
+
+      bubbles.set(node.id, {
+        mesh,
+        halo,
+        label,
+        el,
+        base,
+        born: bornAt(node.id, p.grow),
+        phase: Math.random() * Math.PI * 2,
+      });
+    }
+    spineLength = Math.max(1, tree.weekRoots.length - 1 + 1.5);
   }
 
   // ---- selection marker and the pulse ----------------------------------------
@@ -226,6 +325,7 @@ export function startScene({ tree, container, initialId, reducedMotion, onSelect
     new THREE.MeshBasicMaterial({ color: new THREE.Color(2.2, 2.2, 2.2), toneMapped: false }),
   );
   treeGroup.add(ring);
+  cleanup.push(() => release(ring));
   const pulse = new THREE.Sprite(
     new THREE.SpriteMaterial({
       map: glow,
@@ -238,9 +338,9 @@ export function startScene({ tree, container, initialId, reducedMotion, onSelect
   pulse.scale.setScalar(1.6);
   pulse.visible = false;
   treeGroup.add(pulse);
+  cleanup.push(() => release(pulse));
 
   // ---- particles drifting down the spine ---------------------------------------
-  const oldest = tree.weekRoots.length - 1;
   const PARTICLES = 700;
   const particleGeometry = new THREE.BufferGeometry();
   const particlePos = new Float32Array(PARTICLES * 3);
@@ -266,7 +366,7 @@ export function startScene({ tree, container, initialId, reducedMotion, onSelect
     }),
   );
   scene.add(particles);
-  const spineLength = Math.max(1, oldest + 1.5);
+  cleanup.push(() => release(particles));
 
   // ---- camera, selection and flight ----------------------------------------------
   let selected = initialId;
@@ -275,6 +375,7 @@ export function startScene({ tree, container, initialId, reducedMotion, onSelect
   let motion = !reducedMotion;
   const timer = new THREE.Timer();
   let startedAt = motion ? 0 : -1e6; // with reduced motion, everything is already grown
+  const age = () => timer.getElapsed() - startedAt;
 
   const worldOf = (id) => {
     const b = bubbles.get(id);
@@ -305,6 +406,14 @@ export function startScene({ tree, container, initialId, reducedMotion, onSelect
     controls.update();
   }
 
+  /** Centre on a node at once, keeping the current viewing angle. @param {number} id @param {THREE.Vector3} [offset] */
+  function land(id, offset) {
+    const keep = offset ?? camera.position.clone().sub(controls.target);
+    const target = focusOf(id);
+    controls.target.copy(target);
+    camera.position.copy(target).add(keep);
+  }
+
   /** @param {number} id */
   function select(id) {
     if (!bubbles.has(id)) return;
@@ -314,11 +423,7 @@ export function startScene({ tree, container, initialId, reducedMotion, onSelect
     if (!motion || from === id) {
       flight = null;
       pulse.visible = false;
-      // Keep the user's orbit, just move what it's centred on.
-      const offset = camera.position.clone().sub(controls.target);
-      const target = focusOf(id);
-      controls.target.copy(target);
-      camera.position.copy(target).add(offset);
+      land(id);
       if (!motion) {
         container.classList.remove("cut");
         void container.offsetWidth;
@@ -327,7 +432,11 @@ export function startScene({ tree, container, initialId, reducedMotion, onSelect
       return;
     }
     const path = flightPath(from, id);
-    if (path.curves.length === 0) return select(id);
+    if (path.curves.length === 0) {
+      flight = null;
+      land(id);
+      return;
+    }
     const length = path.getLength();
     flight = {
       path,
@@ -368,28 +477,42 @@ export function startScene({ tree, container, initialId, reducedMotion, onSelect
     }
     return best;
   };
-  renderer.domElement.addEventListener("pointerdown", (e) => {
-    down = { x: e.clientX, y: e.clientY };
-  });
-  renderer.domElement.addEventListener("pointerup", (e) => {
-    if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 6) return;
-    const id = hit(e);
-    if (id !== null) pick(id);
-  });
+  const canvas = renderer.domElement;
+  canvas.addEventListener(
+    "pointerdown",
+    (e) => {
+      down = { x: e.clientX, y: e.clientY };
+    },
+    { signal },
+  );
+  canvas.addEventListener(
+    "pointerup",
+    (e) => {
+      if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 6) return;
+      const id = hit(e);
+      if (id !== null) pick(id);
+    },
+    { signal },
+  );
   let hoverFrame = 0;
   let hovered = null;
-  renderer.domElement.addEventListener("pointermove", (e) => {
-    if (e.pointerType !== "mouse" || e.buttons !== 0 || hoverFrame) return;
-    hoverFrame = requestAnimationFrame(() => {
-      hoverFrame = 0;
-      const id = hit(e);
-      if (id !== hovered) {
-        hovered = id;
-        renderer.domElement.style.cursor = id === null ? "" : "pointer";
-        onHover(id);
-      }
-    });
-  });
+  canvas.addEventListener(
+    "pointermove",
+    (e) => {
+      if (e.pointerType !== "mouse" || e.buttons !== 0 || hoverFrame) return;
+      hoverFrame = requestAnimationFrame(() => {
+        hoverFrame = 0;
+        const id = hit(e);
+        if (id !== hovered) {
+          hovered = id;
+          canvas.style.cursor = id === null ? "" : "pointer";
+          onHover(id);
+        }
+      });
+    },
+    { signal },
+  );
+  cleanup.push(() => cancelAnimationFrame(hoverFrame));
 
   // Don't let a pan carry the view away from the tree.
   controls.addEventListener("change", () => {
@@ -404,9 +527,16 @@ export function startScene({ tree, container, initialId, reducedMotion, onSelect
     }
   });
 
+  // A hidden stage measures 0×0; that's never a real size, so it's ignored
+  // and the last good one kept.
+  const size = { w: 0, h: 0 };
   function resize() {
     const w = container.clientWidth;
     const h = container.clientHeight;
+    if (w === 0 || h === 0) return false;
+    if (w === size.w && h === size.h) return true;
+    size.w = w;
+    size.h = h;
     camera.aspect = w / h;
     // Pull back on narrow screens so a week's fan still fits.
     camera.fov = w < 640 ? 64 : 52;
@@ -414,18 +544,25 @@ export function startScene({ tree, container, initialId, reducedMotion, onSelect
     renderer.setSize(w, h);
     composer.setSize(w, h);
     labels.setSize(w, h);
+    return true;
   }
-  new ResizeObserver(resize).observe(container);
-  resize();
+  const observer = new ResizeObserver(() => resize());
+  observer.observe(container);
+  cleanup.push(() => observer.disconnect());
+  if (!resize()) throw new Error("the archive stage has no size to render into");
+
+  buildTree();
+  cleanup.push(() => clearTree());
   placeCamera(initialId);
-  for (const [bid, b] of bubbles) b.el.classList.toggle("is-selected", bid === initialId);
 
   // ---- the frame -------------------------------------------------------------------
   const tmp = new THREE.Vector3();
+  let frames = 0;
   function frame() {
     timer.update();
     const t = timer.getElapsed();
-    const age = t - startedAt;
+    const now = t - startedAt;
+    frames++;
 
     // Growth: each edge extends between its parent's and child's time.
     const eye = treeGroup.worldToLocal(camera.position.clone());
@@ -434,7 +571,7 @@ export function startScene({ tree, container, initialId, reducedMotion, onSelect
       for (const p of edge.samples) nearest = Math.min(nearest, p.distanceToSquared(eye));
       /** @type {THREE.MeshBasicMaterial} */ (edge.mesh.material).opacity =
         edge.opacity * clamp01((Math.sqrt(nearest) - 4) / 8);
-      const progress = clamp01((age - edge.start) / Math.max(0.01, edge.end - edge.start));
+      const progress = clamp01((now - edge.start) / Math.max(0.01, edge.end - edge.start));
       const index = edge.mesh.geometry.index;
       const count = index ? index.count : 0;
       edge.mesh.geometry.setDrawRange(0, Math.floor((count * progress) / 6) * 6);
@@ -451,7 +588,7 @@ export function startScene({ tree, container, initialId, reducedMotion, onSelect
 
     const selNode = tree.nodes.get(selected);
     for (const [id, b] of bubbles) {
-      const bloomT = clamp01((age - b.born) / BLOOM_TIME);
+      const bloomT = clamp01((now - b.born) / BLOOM_TIME);
       const s = bloomT === 0 ? 0.0001 : b.base * (bloomT < 1 ? easeOutBack(bloomT) : 1);
       const breathe = motion ? 1 + Math.sin(t * 1.6 + b.phase) * 0.06 : 1;
       b.mesh.scale.setScalar(s * breathe);
@@ -521,20 +658,95 @@ export function startScene({ tree, container, initialId, reducedMotion, onSelect
     composer.render();
     labels.render(scene, camera);
   }
-  renderer.setAnimationLoop(frame);
+
+  // ---- lifecycle -------------------------------------------------------------------
+  let running = false;
+  let disposed = false;
+  let waiting = 0;
+
+  function pause() {
+    running = false;
+    cancelAnimationFrame(waiting);
+    waiting = 0;
+    renderer.setAnimationLoop(null);
+  }
+
+  // Only start drawing once the stage has a real size again.
+  function resume() {
+    if (disposed || running) return;
+    cancelAnimationFrame(waiting);
+    if (!resize()) {
+      waiting = requestAnimationFrame(() => {
+        waiting = 0;
+        resume();
+      });
+      return;
+    }
+    running = true;
+    timer.reset();
+    renderer.setAnimationLoop(frame);
+  }
+  cleanup.push(() => pause());
+
+  resume();
 
   return {
     select,
+    /** New data: rebuild in place, growing only what's new. @param {Tree} next */
+    update(next) {
+      if (disposed) return;
+      const known = new Set(bubbles.keys());
+      const offset = flight ? flight.offset : camera.position.clone().sub(controls.target);
+      const to = flight?.to;
+      flight = null;
+      pulse.visible = false;
+      clearTree();
+      tree = next;
+      if (!tree.nodes.has(selected)) selected = tree.rootId;
+      if (to !== undefined && tree.nodes.has(to)) selected = to;
+      buildTree(known);
+      land(selected, offset);
+    },
+    pause,
+    resume,
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      pause();
+      for (const fn of cleanup.reverse()) {
+        try {
+          fn();
+        } catch {
+          // keep releasing the rest
+        }
+      }
+      cleanup.length = 0;
+    },
     /** @param {boolean} reduced */
     setReducedMotion(reduced) {
       motion = !reduced;
       if (reduced) {
         startedAt = -1e6;
+        // Finish any flight where it was going, at once, measured against the
+        // still tree the next frames will draw.
+        treeGroup.rotation.set(0, 0, 0);
+        treeGroup.updateMatrixWorld(true);
+        if (flight) land(flight.to, flight.offset);
         flight = null;
         pulse.visible = false;
       }
     },
-    /** For checks: how many nodes the scene holds and whether it's mid-flight. */
-    stats: () => ({ nodes: bubbles.size, edges: edges.size, flying: flight !== null, selected }),
+    /** For checks: what the scene holds, whether it's drawing, and how much it has drawn. */
+    stats: () => ({
+      nodes: bubbles.size,
+      edges: edges.size,
+      flying: flight !== null,
+      selected,
+      running,
+      frames,
+      size: { ...size },
+      target: controls.target.toArray().map((v) => Number(v.toFixed(2))),
+      focus: focusOf(selected).toArray().map((v) => Number(v.toFixed(2))),
+    }),
   };
 }

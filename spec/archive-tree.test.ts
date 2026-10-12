@@ -1,5 +1,15 @@
 import { expect, it } from "vitest";
-import { buildTree, describe, edgeMessage, layout, move, pathBetween } from "../public/archive-tree.js";
+import {
+  applyMark,
+  applyWeek,
+  buildTree,
+  describe,
+  edgeMessage,
+  layout,
+  move,
+  pathBetween,
+  tooBigForScene,
+} from "../public/archive-tree.js";
 
 // The archive's keyboard rules, on a small hand-built tree (no server, no DOM):
 //
@@ -105,4 +115,78 @@ it("lays older weeks out to the left, below and behind", () => {
   expect(p.get(31)!.x).toBeGreaterThan(w3.x);
   expect(p.get(32)!.x).toBeGreaterThan(p.get(31)!.x);
   expect(p.size).toBe(11);
+});
+
+// Live events applied to a snapshot: each lands once, in id order, and the
+// previous-week edge stays leftmost.
+const snapshot = () => ({
+  currentWeekId: 2,
+  weeks: [
+    { id: 2, weekStart: "2026-10-05", label: "Week 2", rootMarkId: 20, prevWeekId: 1, archived: false },
+    { id: 1, weekStart: "2026-09-28", label: "Week 1", rootMarkId: 10, prevWeekId: null, archived: true },
+  ],
+  marks: [
+    mark(20, null, 2, [10, 21], true),
+    mark(21, 20, 2, []),
+    mark(10, 20, 1, [], true),
+  ],
+});
+const live = (id: number, parentId: number, parentChildCount: number) => ({
+  id,
+  parentId,
+  weekId: 2,
+  name: "Live",
+  body: `live ${id}`,
+  createdAt: "2026-10-07T00:00:00.000Z",
+  childCount: 0,
+  parentChildCount,
+  mine: false,
+});
+
+it("applies a live mark once, after the previous-week edge, with the parent's count", () => {
+  const data = snapshot();
+  expect(applyMark(data, live(23, 20, 3))).toBe(true);
+  expect(applyMark(data, live(22, 20, 3))).toBe(true);
+  expect(applyMark(data, live(23, 20, 3))).toBe(false);
+  const t = buildTree(data);
+  expect(t.nodes.get(20)?.children).toEqual([10, 21, 22, 23]);
+  expect(t.nodes.get(20)?.childCount).toBe(3);
+  expect(move(t, 21, "left")).toBe(10);
+  expect(applyMark(data, live(99, 12345, 1))).toBe(false); // unknown parent
+});
+
+it("makes a new week the top and seals the rest", () => {
+  const data = snapshot();
+  const week = { id: 3, weekStart: "2026-10-12", label: "Week 3", rootMarkId: 30, prevWeekId: 2, prevRootMarkId: 20 };
+  expect(applyWeek(data, week)).toBe(true);
+  expect(applyWeek(data, week)).toBe(false);
+  const t = buildTree(data);
+  expect(t.rootId).toBe(30);
+  expect(t.weekRoots).toEqual([30, 20, 10]);
+  expect(t.nodes.get(20)?.archived).toBe(true);
+  expect(move(t, 30, "older")).toBe(20);
+  expect(move(t, 30, "down")).toBeNull();
+});
+
+it("from an empty current week, the week buttons reach every older week and back", () => {
+  const data = snapshot();
+  applyWeek(data, { id: 3, weekStart: "2026-10-12", label: "Week 3", rootMarkId: 30, prevWeekId: 2, prevRootMarkId: 20 });
+  const t = buildTree(data);
+  const visited = [t.rootId];
+  for (let id = move(t, t.rootId, "older"); id !== null; id = move(t, id, "older")) visited.push(id);
+  expect(visited).toEqual([30, 20, 10]);
+  expect(move(t, 10, "newer")).toBe(20);
+  expect(move(t, 10, "home")).toBe(30);
+});
+
+it("hands a tree too big or too deep for the scene to the list", () => {
+  expect(tooBigForScene(tree)).toBeNull();
+  const marks = [mark(1, null, 1, [2], true)];
+  for (let i = 2; i < 80; i++) marks.push(mark(i, i - 1, 1, [i + 1]));
+  const deep = buildTree({
+    currentWeekId: 1,
+    weeks: [{ id: 1, weekStart: "2026-10-05", label: "W", rootMarkId: 1, prevWeekId: null, archived: false }],
+    marks,
+  });
+  expect(tooBigForScene(deep)).toMatch(/deep/);
 });

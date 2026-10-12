@@ -230,3 +230,93 @@ export function layout(tree) {
   });
   return out;
 }
+
+// ---- live updates ------------------------------------------------------------------
+// The live feed's events (src/live.ts), applied to an /archive.json snapshot in
+// place. Both are idempotent: an event already in the snapshot only refreshes
+// counts. Each returns whether anything changed.
+
+/**
+ * @param {ArchiveData} data
+ * @param {{ id: number, parentId: number, weekId: number, name: string, body: string,
+ *   createdAt: string, childCount: number, parentChildCount: number, mine: boolean }} m
+ */
+export function applyMark(data, m) {
+  const parent = data.marks.find((x) => x.id === m.parentId);
+  if (!parent) return false;
+  const existing = data.marks.find((x) => x.id === m.id);
+  const changed = parent.childCount !== m.parentChildCount || (existing && existing.childCount !== m.childCount);
+  parent.childCount = m.parentChildCount;
+  if (existing) {
+    existing.childCount = m.childCount;
+    return Boolean(changed);
+  }
+  data.marks.push({
+    id: m.id,
+    parentId: m.parentId,
+    weekId: m.weekId,
+    isRoot: false,
+    name: m.name,
+    body: m.body,
+    createdAt: m.createdAt,
+    childCount: m.childCount,
+    children: [],
+    mine: m.mine,
+  });
+  // A root's previous-week edge stays leftmost; real marks follow in id order.
+  const roots = parent.children.filter((c) => data.marks.find((x) => x.id === c)?.isRoot);
+  const real = parent.children.filter((c) => !roots.includes(c));
+  parent.children = [...roots, ...[...real, m.id].sort((a, b) => a - b)];
+  return true;
+}
+
+/**
+ * A lazily created week: newer than the current one, it becomes the top.
+ * @param {ArchiveData} data
+ * @param {{ id: number, weekStart: string, label: string, rootMarkId: number,
+ *   prevWeekId: number | null, prevRootMarkId: number | null }} w
+ */
+export function applyWeek(data, w) {
+  if (data.weeks.some((x) => x.id === w.id)) return false;
+  const current = data.weeks.find((x) => x.id === data.currentWeekId);
+  const newer = !current || w.weekStart > current.weekStart;
+  data.weeks.push({
+    id: w.id,
+    weekStart: w.weekStart,
+    label: w.label,
+    rootMarkId: w.rootMarkId,
+    prevWeekId: w.prevWeekId,
+    archived: !newer,
+  });
+  const prevRoot = w.prevRootMarkId === null ? undefined : data.marks.find((x) => x.id === w.prevRootMarkId);
+  data.marks.push({
+    id: w.rootMarkId,
+    parentId: null,
+    weekId: w.id,
+    isRoot: true,
+    name: "Marks",
+    body: w.label,
+    createdAt: w.weekStart,
+    childCount: 0,
+    children: prevRoot ? [prevRoot.id] : [],
+    mine: false,
+  });
+  if (prevRoot) prevRoot.parentId = w.rootMarkId;
+  if (newer) {
+    for (const x of data.weeks) x.archived = x.id !== w.id;
+    data.currentWeekId = w.id;
+  }
+  return true;
+}
+
+// Past these, the 3D view hands over to the list rather than try to draw it.
+export const SCENE_LIMITS = { nodes: 1500, depth: 60 };
+
+/** @param {Tree} tree @returns {string | null} why the scene shouldn't draw it */
+export function tooBigForScene(tree) {
+  if (tree.nodes.size > SCENE_LIMITS.nodes) return `${tree.nodes.size} marks is more than the 3D view can draw well.`;
+  let deepest = 0;
+  for (const n of tree.nodes.values()) deepest = Math.max(deepest, n.depth);
+  if (deepest > SCENE_LIMITS.depth) return `A thread ${deepest} replies deep is more than the 3D view can lay out.`;
+  return null;
+}
