@@ -29,8 +29,32 @@ export interface WeekRow {
 }
 
 export type PostResult =
-  | { ok: true; id: number; parentId: number }
+  | { ok: true; id: number; parentId: number; weekId: number }
   | { ok: false; reason: "not-found" | "archived" };
+
+// One row of the audit trail (src/log.ts writes them; scripts/audit.ts reads
+// them). `detail` is a JSON object of anything else worth keeping.
+export interface AuditEvent {
+  ts: string;
+  request_id: string | null;
+  actor: string | null;
+  action: string;
+  outcome: string;
+  reason: string | null;
+  mark_id: number | null;
+  parent_id: number | null;
+  week_id: number | null;
+  detail: string | null;
+}
+
+export interface AuditFilter {
+  actor?: string;
+  action?: string;
+  mark?: number;
+  since?: string;
+  until?: string;
+  limit?: number;
+}
 
 export const SYSTEM_VISITOR = "system";
 export const SYSTEM_NAME = "Marks";
@@ -53,7 +77,12 @@ function transaction<T>(db: DatabaseSync, fn: () => T): T {
   }
 }
 
-export function openStore(file: string) {
+export interface StoreOptions {
+  // Called after the transaction that lazily created a week's root commits.
+  onWeekCreated?: (week: WeekRow) => void;
+}
+
+export function openStore(file: string, opts: StoreOptions = {}) {
   const db = new DatabaseSync(file);
 
   // The original crit-8 table, unchanged, so an existing volume opens as-is;
@@ -80,6 +109,22 @@ export function openStore(file: string) {
     );
     create index if not exists marks_parent on marks(parent_id);
     create index if not exists marks_week on marks(week_id);
+    create table if not exists audit (
+      id integer primary key autoincrement,
+      ts text not null,
+      request_id text,
+      actor text,
+      action text not null,
+      outcome text not null,
+      reason text,
+      mark_id integer,
+      parent_id integer,
+      week_id integer,
+      detail text
+    );
+    create index if not exists audit_ts on audit(ts);
+    create index if not exists audit_actor on audit(actor, ts);
+    create index if not exists audit_mark on audit(mark_id);
   `);
 
   const stmt = {
@@ -106,6 +151,14 @@ export function openStore(file: string) {
     ),
     all: db.prepare(
       "select m.*, (select count(*) from marks c where c.parent_id = m.id) as child_count from marks m order by m.id",
+    ),
+    after: db.prepare(
+      "select m.*, (select count(*) from marks c where c.parent_id = m.id) as child_count from marks m where m.id > ? order by m.id limit ?",
+    ),
+    maxId: db.prepare("select coalesce(max(id), 0) as id from marks"),
+    childCount: db.prepare("select count(*) as n from marks where parent_id = ?"),
+    insertAudit: db.prepare(
+      "insert into audit (ts, request_id, actor, action, outcome, reason, mark_id, parent_id, week_id, detail) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     ),
   };
 
@@ -143,7 +196,9 @@ export function openStore(file: string) {
     const { start, startsAt } = weekOf(now);
     const existing = stmt.weekByStart.get(start) as WeekRow | undefined;
     if (existing) return existing;
-    return transaction(db, () => ensureWeekIn(start, startsAt));
+    const week = transaction(db, () => ensureWeekIn(start, startsAt));
+    opts.onWeekCreated?.(week);
+    return week;
   }
 
   // Backfill: hang every pre-tree mark under the root of the week it was
@@ -187,20 +242,75 @@ export function openStore(file: string) {
     return out;
   }
 
+  function insertAudit(e: AuditEvent): void {
+    stmt.insertAudit.run(
+      e.ts,
+      e.request_id,
+      e.actor,
+      e.action,
+      e.outcome,
+      e.reason,
+      e.mark_id,
+      e.parent_id,
+      e.week_id,
+      e.detail,
+    );
+  }
+
+  // The sealing decision and the write happen in one synchronous transaction,
+  // against the `now` the caller read after the request body arrived, so no
+  // other request (and no midnight) can land between them. A successful
+  // mark's audit row commits with it: `audit` turns the result into the row.
   function post(
     visitorId: string,
     name: string,
     body: string,
     parentId: number | null,
     now: Date,
+    audit?: (result: Extract<PostResult, { ok: true }>) => AuditEvent,
   ): PostResult {
-    const week = currentWeek(now);
-    const parent = getMark(parentId ?? week.root_mark_id);
-    if (!parent) return { ok: false, reason: "not-found" };
-    // Archived means sealed: anything under a past week is read-only for good.
-    if (parent.week_id !== week.id) return { ok: false, reason: "archived" };
-    const res = stmt.insertMark.run(visitorId, name, body, now.toISOString(), parent.id, week.id, 0);
-    return { ok: true, id: Number(res.lastInsertRowid), parentId: parent.id };
+    const { start, startsAt } = weekOf(now);
+    let created = false;
+    const result = transaction(db, (): PostResult => {
+      created = !stmt.weekByStart.get(start);
+      const week = ensureWeekIn(start, startsAt);
+      const parent = getMark(parentId ?? week.root_mark_id);
+      if (!parent) return { ok: false, reason: "not-found" };
+      // Archived means sealed: anything under a past week is read-only for good.
+      if (parent.week_id !== week.id) return { ok: false, reason: "archived" };
+      const res = stmt.insertMark.run(visitorId, name, body, now.toISOString(), parent.id, week.id, 0);
+      const ok = { ok: true as const, id: Number(res.lastInsertRowid), parentId: parent.id, weekId: week.id };
+      if (audit) insertAudit(audit(ok));
+      return ok;
+    });
+    if (created) opts.onWeekCreated?.(stmt.weekByStart.get(start) as unknown as WeekRow);
+    return result;
+  }
+
+  // Every row after `id`, oldest first: the live feed's catch-up, since
+  // marks are append-only and ids only grow.
+  function marksAfter(id: number, limit: number): MarkWithCount[] {
+    return stmt.after.all(id, limit) as unknown as MarkWithCount[];
+  }
+
+  function lastMarkId(): number {
+    return (stmt.maxId.get() as { id: number }).id;
+  }
+
+  function childCount(id: number): number {
+    return (stmt.childCount.get(id) as { n: number }).n;
+  }
+
+  function queryAudit(f: AuditFilter = {}): (AuditEvent & { id: number })[] {
+    const where: string[] = [];
+    const args: (string | number)[] = [];
+    if (f.actor) (where.push("actor = ?"), args.push(f.actor));
+    if (f.action) (where.push("action = ?"), args.push(f.action));
+    if (f.mark !== undefined) (where.push("(mark_id = ? or parent_id = ?)"), args.push(f.mark, f.mark));
+    if (f.since) (where.push("ts >= ?"), args.push(f.since));
+    if (f.until) (where.push("ts < ?"), args.push(f.until));
+    const sql = `select * from (select * from audit${where.length ? ` where ${where.join(" and ")}` : ""} order by id desc limit ?) order by id`;
+    return db.prepare(sql).all(...args, f.limit ?? 200) as unknown as (AuditEvent & { id: number })[];
   }
 
   function weeks(): WeekRow[] {
@@ -211,7 +321,23 @@ export function openStore(file: string) {
     return stmt.all.all() as unknown as MarkWithCount[];
   }
 
-  return { currentWeek, getMark, getWeek, isArchived, children, ancestors, post, weeks, allMarks, close: () => db.close() };
+  return {
+    currentWeek,
+    getMark,
+    getWeek,
+    isArchived,
+    children,
+    ancestors,
+    post,
+    weeks,
+    allMarks,
+    marksAfter,
+    lastMarkId,
+    childCount,
+    insertAudit,
+    queryAudit,
+    close: () => db.close(),
+  };
 }
 
 export type Store = ReturnType<typeof openStore>;
