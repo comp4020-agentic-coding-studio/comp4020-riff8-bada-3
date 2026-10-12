@@ -42,10 +42,18 @@ change first --- not the other way around.
 - No accounts. Identity is a random id in a first-party cookie, issued on
   first visit. Never add passwords, email, or OAuth --- this app only needs
   to tell two visitors apart, not verify who they are. `visitor_id` never
-  leaves the server: `/archive.json` sends a per-request `mine` flag instead.
+  leaves the server: `/archive.json` and every live event carry a
+  per-listener `mine` flag, and logs carry `actorOf()`'s hash (`src/log.ts`).
 - Marks are permanent once posted: no edit, no delete. A week is sealed at
   00:00 Monday, Sydney time: nothing can be posted under any mark in a past
-  week, and the form isn't rendered there.
+  week, and the form isn't rendered there. The week is decided inside
+  `store.post()`'s transaction, from the clock read after the body arrived;
+  never put an `await` between that decision and the write.
+- Validate, never truncate: names are at most 40 and bodies 280 UTF-16 code
+  units (what `maxlength` counts) after CRLF->LF and trimming
+  (`src/validate.ts`). A rejection keeps the draft and says why, on its field.
+  Anything that can fail runs before the write, so a stored mark always gets
+  its 303.
 - The tree is a parent pointer (`marks.parent_id`); week roots are rows in
   `marks`, chained through `weeks.prev_week_id`. Never store children as an
   array. Rollover is lazy, on request, never a timer (the machine sleeps).
@@ -57,10 +65,21 @@ change first --- not the other way around.
   (`escapeHtml` in `src/render.ts`). On the client, user text goes in via
   `textContent` only, never `innerHTML`.
 - Server-rendered HTML is the interface. Home and mark pages work fully with
-  JavaScript off. The archive is the one place JS is required, and its
-  nested-list fallback (no JS, no WebGL, or "List view") must stay complete.
+  JavaScript off; `public/live.js` only patches them in place, and never
+  touches a form. The archive is the one place JS is required, and its
+  nested-list fallback (no JS, no WebGL, a failed start, or "List view")
+  must stay complete and visible until the scene is actually running.
+- The live feed (`src/live.ts`) is the `marks` table read forward by row id;
+  it holds no state of its own. Publish only after a commit. No server
+  timers beyond the SSE ping: rollover stays lazy.
+- Every meaningful action is logged once through `logger.log()`: a JSON line
+  on stdout and an `audit` row. Never log a raw cookie or a whole body. A
+  mark's audit row commits in the mark's own transaction. Audit data is read
+  with `scripts/audit.ts` on the machine, never served.
 - One SQLite file on the Fly volume (`node:sqlite`, no native dependency,
   no separate database service) is the only storage. No ORM, no build step.
+  `src/app.ts`'s `createApp()` takes the clock and data dir, so tests run it
+  in-process; never add a request parameter that moves the clock.
 - Dependencies: `marked` renders README.md at `/readme/`; `three` drives the
   archive and is served from `node_modules` under its version, through the
   import map in `src/server.ts`. Anything else new needs the same
