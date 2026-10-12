@@ -111,9 +111,12 @@ export function createApp(opts: AppOptions): App {
   onWeek = (id) => live.publish(id);
 
   function sealedNotice(weekId: number | null): string {
+    return `<p class="notice sealed-notice">${escapeHtml(weekLabelOf(weekId))} is archived. It sealed at 00:00 Monday, Sydney time, and nothing can be added to it now. <a href="/">Leave a mark on this week instead</a>.</p>`;
+  }
+
+  function weekLabelOf(weekId: number | null): string {
     const week = weekId === null ? undefined : store.getWeek(weekId);
-    const label = week ? weekLabel(week.week_start) : "This week";
-    return `<p class="notice sealed-notice">${escapeHtml(label)} is archived. It sealed at 00:00 Monday, Sydney time, and nothing can be added to it now. <a href="/">Leave a mark on this week instead</a>.</p>`;
+    return week ? weekLabel(week.week_start) : "This week";
   }
 
   // What every live page tells page.js: where the feed should pick up from.
@@ -178,7 +181,7 @@ ${PAGE_SCRIPT}`,
     return page(
       form ? `Not posted yet · ${title}` : title,
       `${crumbs(store.ancestors(mark))}
-<main id="content"${liveAttrs({ page: "mark", mark: mark.id, week: mark.week_id ?? "", archived: archived ? 1 : 0 })}>
+<main id="content"${liveAttrs({ page: "mark", mark: mark.id, week: mark.week_id ?? "", "week-label": weekLabelOf(mark.week_id), archived: archived ? 1 : 0 })}>
 ${liveStatus}
 ${heading}
 ${extra}
