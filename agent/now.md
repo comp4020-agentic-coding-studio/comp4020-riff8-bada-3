@@ -1,25 +1,35 @@
 # now
 
-## State as of this run (2026-10-06 morning, ~29.5 h to cutoff, `comp4020-final-bada`)
+## State as of 2026-10-12 (~160 h to cutoff, `comp4020-final-bada`, crit 10)
 
-Final run for crit 8 ("It's alive!", `08-its-alive.json`, unchanged). The
-finishing steps are done. The working tree is clean and in sync with
-`origin/main`. Nothing new to push: HEAD's only change since `257c251` was
-`PROCESS.md`.
+Crit 10 ("Fly by instruments", `10-fly-by-instruments.json`) is open. It
+asks for two distinguishable users, server-enforced view/modify rules
+recorded in the repo, server-side logs of who did what (kept after the
+crit), and `reflections/crit-10.md` plus a PROCESS.md overview.
 
-- `pnpm check` passed with the app running locally on 8080 (8/8). `check:evidence`
-  passed for both `reflections/crit-8.md` (280 words) and `PROCESS.md`
-  (498 words, 3 citations, all under the
-  `comp4020-agentic-coding-studio` org).
-- Real-browser check: `/` and `/readme/` render. `agent-browser a11y` found 0
-  violations and 0 incomplete. The local server was stopped and its PID confirmed gone.
-- Redeployed HEAD to Fly. Live `/` and `/readme/` return 200, and the
-  `visitor` cookie is issued.
+Done this run (pushed; the repo is public, so CI deployed it, Fly v21):
 
-## Single most important next action
+- `src/log.ts`: one logfmt line per action to stdout, led by
+  `visitor=<6-hex sha256 tag>`, never the raw cookie id. String values are
+  JSON-quoted so they can't forge lines. The actions are arrive, view, post,
+  post-refused, live-open/close, readme, refused (405 for PUT/PATCH/DELETE)
+  and not-found. `/favicon.ico` answers 204 so it doesn't show up in the log.
+- `getVisitorId` only accepts UUID-shaped cookies. Anything else gets a
+  fresh id.
+- `docs/decisions/0002-who-can-do-what.md`, README "Who can do what",
+  CLAUDE.md rule updated (the stale "logging is crit 11" rule is gone).
+- `spec/access.test.ts`: 6 tests, 19 in total, all green.
+- Checked with two isolated `agent-browser --session a|b` browsers both
+  posting as "Ana". Ownership and the live "new" badge were correct, and
+  the log told them apart. On live I probed the GET routes, a DELETE and a
+  bogus cookie, then read `flyctl logs`. I made no posts on production.
 
-The repo goes public at the crit-8 cutoff. The next deliverable work is crit 9
-in this same repo. Re-fetch that source fresh, then build real-time updates
-plus one documented multi-user behaviour decision on top of Marks. That is
-an addition, not a rewrite. From the second final-project crit on, CI deploys
-every push, so every commit is public the moment it's pushed.
+## Next action
+
+Deepen. The best candidate is a cold two-profile pass by a blind subagent
+against a local server on its own port (not production). Its narration
+should come from the log alone, to check that the log is enough to narrate
+the crit. Consider whether a `name=` typed by two different visitors
+should be visible on the wall too (ADR 0002 lists this as a cost). On the
+final run, write `reflections/crit-10.md` (headed "Fly by instruments") and
+a crit-10 section in PROCESS.md citing `git log` commits.

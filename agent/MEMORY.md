@@ -633,6 +633,33 @@ Durable self-knowledge, curated run by run; ephemeral state belongs in
   consistent with the standing "check:evidence never validates the URL,
   only the SHA" lesson elsewhere in this file.
 
+- `pkill -f "<pattern>"` inside a Bash tool call whose own command line
+  contains that same pattern kills the tool's shell itself (exit 144, and
+  every later statement in the call silently doesn't run). Kill by the
+  listening PID from `ss -ltnp | grep :<port>` instead. Confirmed in
+  `comp4020-final-bada` week 10.
+
+- `comp4020-final-bada`'s `pnpm check` runs its specs against a *running*
+  app (`spec/global-setup.ts`), so with nothing listening it fails with "No
+  test files found" plus "nothing is answering at :8080", which looks like a
+  broken config but isn't. Start one first on a throwaway dir:
+  `DATA_DIR=$(mktemp -d) PORT=8091 node src/server.ts &`, then
+  `APP_URL=http://localhost:8091 pnpm check`, then kill the PID from
+  `ss -ltnp`.
+
+- Load-checking an SSE app needs no browser: a Node script opening N
+  `fetch('/events')` streams (each with its own `visitor=` cookie), parsing
+  `data:` lines off `r.body`, then timing POSTs against arrival. On
+  `comp4020-final-bada` (crit 9), 60 listeners got all 15 marks, worst
+  267 ms, ~92 MB RSS. One run of this is enough; it came back clean.
+
+- Two isolated browser profiles (a crit's "separate Chrome profiles"):
+  `agent-browser --session a open ...` / `--session b ...` gives each its
+  own cookie jar. Confirmed in `comp4020-final-bada` crit 10.
+- `flyctl status` prints the machine version as a bare number in a
+  `VERSION` column, not `vNN`. A deploy-wait loop grepping `v[0-9]+`
+  never matches. Use the `LAST UPDATED` timestamp instead.
+
 ## Repo-independent lessons
 
 - stylelint-config-standard rejects BEM double-underscore class names
@@ -2249,3 +2276,26 @@ Durable self-knowledge, curated run by run; ephemeral state belongs in
   and worth distinguishing from a one-off attack-shaped failure (e.g. an
   oversized body) which doesn't persist across requests the way a bad
   cookie does.
+- For an SSE feed over a table that's append-only, the reconnect-gap fix is
+  to make the SSE `id:` the row id and replay `where id > Last-Event-ID` on
+  connect. The browser sends the header automatically on reconnect, and
+  there's no in-memory backlog to lose on restart. A page passes its own
+  starting point as `?after=<max rendered id>` for the first connect, which
+  covers a post landing between render and connect. Gotcha:
+  `Number(searchParams.get("after"))` is `Number(null) === 0`, which replays
+  the entire history to a client that sent no starting point. Default to
+  `NaN` instead. Done in `comp4020-final-bada` crit 9 and verified through
+  Fly's proxy, where streaming isn't buffered and 25 s comment pings hold it
+  open.
+- A browser `EventSource` only auto-retries network errors. If a reconnect
+  gets any non-stream answer (a 502/503 from a proxy while the one machine
+  restarts on a deploy), it goes `CLOSED` for good and the tab stays dead
+  after the server is back. Reproduce locally: open the page, kill the
+  server, bind a two-line 503 stub to the same port for a few seconds,
+  then restart the real server and post. Fix: on `error` with
+  `readyState === CLOSED`, reopen with backoff from the newest id already
+  shown (`?after=`, since a fresh `EventSource` sends no
+  `Last-Event-ID`), and reopen straight away on `visibilitychange` to
+  visible. Done in `comp4020-final-bada` crit 9, with a jsdom test that
+  runs the served page and `/live.js` against a stand-in `EventSource`
+  and a captured `setTimeout`. Reverting the fix turns the test red.
