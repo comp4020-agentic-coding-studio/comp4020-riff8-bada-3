@@ -8,6 +8,7 @@ import {
   layout,
   move,
   pathBetween,
+  snippet,
   tooBigForScene,
 } from "../public/archive-tree.js";
 
@@ -189,4 +190,10 @@ it("hands a tree too big or too deep for the scene to the list", () => {
     marks,
   });
   expect(tooBigForScene(deep)).toMatch(/deep/);
+});
+
+it("never cuts an emoji in half when shortening a label", () => {
+  const cut = snippet(`${"a".repeat(8)}😀😀😀`, 10);
+  expect(cut.isWellFormed()).toBe(true);
+  expect(cut).toBe(`${"a".repeat(8)}😀…`);
 });

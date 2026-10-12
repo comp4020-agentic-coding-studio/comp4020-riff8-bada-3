@@ -119,8 +119,9 @@ export function pathBetween(tree, a, b) {
 
 /** @param {string} s @param {number} max */
 export function snippet(s, max) {
-  const line = s.split(/\r?\n/)[0];
-  return line.length > max ? `${line.slice(0, max - 1).trimEnd()}…` : line;
+  // by code point, so an emoji is never cut in half
+  const chars = [...s.split(/\r?\n/)[0]];
+  return chars.length > max ? `${chars.slice(0, max - 1).join("").trimEnd()}…` : chars.join("");
 }
 
 /** @param {number} n */
