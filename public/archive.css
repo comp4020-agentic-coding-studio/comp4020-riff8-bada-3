@@ -7,6 +7,8 @@
 /* Past five levels each step indents only a little, so a deep thread still
    fits a phone; the nesting (and the border at each level) still shows it. */
 #list-view ul ul ul ul ul ul { padding-left: 0.4rem; }
+/* Past twenty, no more indent at all: the nesting is still in the markup. */
+#list-view ul ul ul ul ul ul ul ul ul ul ul ul ul ul ul ul ul ul ul ul ul { padding-left: 0; border-left: 0; }
 @media (max-width: 480px) {
   #list-view ul { padding-left: 0.7rem; }
   #list-view ul ul ul ul { padding-left: 0.3rem; }
